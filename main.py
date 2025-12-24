@@ -1,13 +1,35 @@
 import pandas as pd
+import plotly.express as px
 import streamlit as st
 
+from analysis import get_year_stats, process_city
 from plots import get_figure, get_plot
 
 SEASON_COLORS = {
-    "winter": "blue",
-    "spring": "green",
-    "summer": "red",
-    "autumn": "orange",
+    "Зима": "blue",
+    "Весна": "green",
+    "Лето": "red",
+    "Осень": "orange",
+}
+
+SEASON_NAMES = {
+    "winter": "Зима",
+    "spring": "Весна",
+    "summer": "Лето",
+    "autumn": "Осень",
+}
+
+COLUMN_NAMES = {
+    "year": "Год",
+    "season": "Сезон",
+    "mean_temp": "Средняя температура, °C",
+    "min_temp": "Минимальная температура, °C",
+    "max_temp": "Максимальная температура, °C",
+    "anomaly_count": "Число аномалий",
+    "std_temp": "Стандартное отклонение",
+    "city": "Город",
+    "timestamp": "Дата",
+    "temperature": "Температура, °C",
 }
 
 
@@ -16,118 +38,7 @@ def load_data(uploaded_file) -> pd.DataFrame:
     if uploaded_file is None:
         st.info("Пожалуйста, загрузите файл для продолжения.")
         st.stop()
-    return pd.read_csv(uploaded_file)
-
-
-def plot_temperature_trends(data: pd.DataFrame):
-    df = data.copy()
-
-    ma30 = df.temperature.rolling(window=30).mean().shift()
-
-    temp_plot = get_plot(
-        x=df.timestamp, y=df.temperature, mode="lines", name="Температура по дням"
-    )
-    ma30_plot = get_plot(
-        x=df.timestamp,
-        y=ma30,
-        mode="lines",
-        name="Скользящее среднее с 30-дневным окном",
-        line_color="orange",
-        line_width=3,
-    )
-
-    temp_figure = get_figure(
-        [temp_plot, ma30_plot],
-        title="График температуры с 30-дневным скользящим средним",
-        xlabel="Дата",
-        ylabel="Температура (°C)",
-    )
-
-    st.plotly_chart(temp_figure, width="stretch")
-
-
-def plot_seasons(data: pd.DataFrame):
-    df = data.copy()
-
-    df["season_block"] = (df["season"] != df["season"].shift()).cumsum()
-    stats = df.groupby("season_block")["temperature"].agg(["mean", "std"])
-
-    plots = []
-
-    for block_id, block in df.groupby("season_block"):
-        season = block["season"].iloc[0]
-        mean = stats.loc[block_id, "mean"]
-        std = stats.loc[block_id, "std"]
-
-        upper = mean + 2 * std
-        lower = mean - 2 * std
-
-        plots.append(
-            get_plot(
-                x=block["timestamp"],
-                y=block["temperature"],
-                mode="lines",
-                line_color=SEASON_COLORS[season],
-                line_width=2,
-                name=season,
-                showlegend=False,
-            )
-        )
-
-        for offset in [2 * std, -2 * std]:
-            plots.append(
-                get_plot(
-                    x=[block["timestamp"].min(), block["timestamp"].max()],
-                    y=[mean + offset] * 2,
-                    mode="lines",
-                    line_color="purple",
-                    line_width=1,
-                    line_dash="dash",
-                    showlegend=False,
-                )
-            )
-
-        outliers = block[
-            (block["temperature"] > upper) | (block["temperature"] < lower)
-        ]
-        if not outliers.empty:
-            plots.append(
-                get_plot(
-                    x=outliers["timestamp"],
-                    y=outliers["temperature"],
-                    mode="markers",
-                    marker_color=SEASON_COLORS[season],
-                    marker_size=8,
-                    name=f"{season} выбросы",
-                    showlegend=False,
-                )
-            )
-    for season, color in SEASON_COLORS.items():
-        plots.append(
-            get_plot(
-                x=[None],
-                y=[None],
-                mode="lines",
-                line_color=color,
-                line_width=2,
-                name=season,
-            )
-        )
-    plots.append(
-        get_plot(
-            x=[None],
-            y=[None],
-            mode="lines",
-            line_color="purple",
-            name=r"$\mu  2 \cdot \sigma$",
-        )
-    )
-
-    figure = get_figure(
-        plots, title="Сезонные аномалии", xlabel="Дата", ylabel="Температура (°C)"
-    )
-
-    st.plotly_chart(figure)
+    return pd.read_csv(uploaded_file, parse_dates=["timestamp"])
 
 
 st.set_page_config(page_title="Weather Analysis", page_icon=":cloud:", layout="wide")
@@ -139,11 +50,97 @@ uploaded_file = st.file_uploader(
     "Выберите CSV файл с историческими температурными данными", type=["csv"]
 )
 data = load_data(uploaded_file)
-data.timestamp = pd.to_datetime(data.timestamp)
-st.subheader("Предварительный просмотр данных")
-st.table(data.head())
+data["season"] = data["season"].map(SEASON_NAMES)
 cities = data.city.unique()
+
+st.subheader("Анализ данных")
+
 selected_city = st.selectbox("Выберите город для анализа", cities)
 city_data = data[data.city == selected_city]
-plot_temperature_trends(city_data)
-plot_seasons(city_data)
+
+st.subheader("Просмотр данных")
+st.dataframe(city_data.reset_index(drop=True))
+
+
+processed_data = process_city(city_data)
+
+stats_df = get_year_stats(processed_data)
+
+st.subheader("Описательная статистика")
+st.dataframe(stats_df.rename(columns=COLUMN_NAMES))
+
+global_max = processed_data.loc[processed_data["temperature"].argmax()]
+global_min = processed_data.loc[processed_data["temperature"].argmin()]
+st.markdown(
+    f"Максимальная температура за 9 лет: **{global_max.temperature:.3f} °C** была в **{global_max.year}** году"
+)
+st.markdown(
+    f"Минимальная температура за 9 лет: **{global_min.temperature:.3f} °C** была в **{global_min.year}** году"
+)
+
+st.subheader("Визуализация")
+
+
+temperature_plot = get_plot(
+    x=processed_data.timestamp,
+    y=processed_data.temperature,
+    mode="lines",
+    name="Температура по дням, °C",
+)
+ma30_plot = get_plot(
+    x=processed_data.timestamp,
+    y=processed_data.ma30,
+    mode="lines",
+    name="Скользящее среднее с окном 30 дней",
+    line_color="orange",
+    line_width=3,
+)
+
+temp_fig = get_figure(
+    [temperature_plot, ma30_plot],
+    title="Общий график температуры",
+    xlabel="Дата",
+    ylabel="Температура, °C",
+)
+
+
+st.plotly_chart(temp_fig)
+season_fig = px.line(
+    processed_data,
+    "timestamp",
+    "temperature",
+    color="season",
+    line_group="season_code",
+    color_discrete_map=SEASON_COLORS,
+    title="График по сезонам с выделением аномалий",
+)
+
+
+upper_fig = px.line(processed_data, "timestamp", "upper", line_group="season_code")
+upper_fig.update_traces(line=dict(color="purple", dash="dash"))
+lower_fig = px.line(processed_data, "timestamp", "lower", line_group="season_code")
+lower_fig.update_traces(line=dict(color="purple", dash="dash"))
+
+anomalies = processed_data[processed_data["is_anomaly"]]
+
+season_fig.add_scatter(
+    x=anomalies.timestamp,
+    y=anomalies.temperature,
+    mode="markers",
+    name="Аномалия в данных",
+    marker=dict(size=8, symbol="circle", color="black"),
+)
+season_fig.add_traces(upper_fig.data)
+season_fig.add_traces(lower_fig.data)
+
+season_fig.update_layout(dict(xaxis_title="Дата", yaxis_title="Температура, °C"))
+
+
+st.plotly_chart(season_fig)
+
+
+owm_api_key = st.text_input(
+    "Введите ключ для OpenWeatherMap API", placeholder="Ваш ключ..."
+)
+if not owm_api_key:
+    st.stop()
