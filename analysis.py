@@ -1,4 +1,5 @@
-import modin.pandas as mpd
+from typing import Any
+
 import pandas as pd
 
 
@@ -14,6 +15,22 @@ def get_moving_average(temperature: pd.Series, window: int = 30) -> pd.Series:
         pd.Series: Скользящее среднее
     """
     return temperature.rolling(window=window).mean()
+
+
+def get_global_min_max(df: pd.DataFrame) -> tuple[Any, Any]:
+    """
+    Возвращает строки с глобальным минимумом и максимумом
+
+    Args:
+        df (pd.DataFrame): Датафрейм
+
+    Returns:
+        tuple[Any, Any]: Кортеж из строк с минимумом и максимумом
+    """
+    global_max = df.loc[df["temperature"].argmax()]
+    global_min = df.loc[df["temperature"].argmin()]
+
+    return global_min, global_max
 
 
 def process_city(city_df: pd.DataFrame) -> pd.DataFrame:
@@ -48,7 +65,7 @@ def process_city(city_df: pd.DataFrame) -> pd.DataFrame:
     return res_df
 
 
-def get_year_stats(data: pd.DataFrame | mpd.DataFrame) -> pd.DataFrame:
+def get_year_stats(data: pd.DataFrame) -> pd.DataFrame:
     """
     Общие статистики для температура по годам и сезонам
 
