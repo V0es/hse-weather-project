@@ -1,110 +1,20 @@
-import asyncio
 from datetime import datetime
 
-import modin.pandas as mpd
 import pandas as pd
-import plotly.express as px
 import streamlit as st
-from aiohttp import ClientResponseError, ClientSession
 
-from analysis import get_season_thresholds, get_year_stats, process_city
-from config import COLUMN_NAMES, MONTH_TO_SEASON, SEASON_COLORS, SEASON_NAMES
-from owm import get_city_coords, get_current_temperature
-from plots import get_figure, get_plot
-from utils import async_timeit, sync_timeit
-
-
-@async_timeit
-async def get_temperatures_sync(cities: list[str], api_key: str) -> dict[str, float]:
-    """
-    Синхронно by design собирает текущую температуру для списка городов и возвращает словарь
-    Применён декоратор для измерения времени выполнения
-    Args:
-        cities (list[str]): Список городов
-        api_key (str): Ключ API OWM
-
-    Returns:
-        dict[str, float]: Словарь город: температура
-    """
-    result = {}
-    async with ClientSession(raise_for_status=True) as session:
-        for city in cities:
-            city_coords = await get_city_coords(session, city, api_key)
-            result[city] = await get_current_temperature(session, city_coords, api_key)
-    return result
-
-
-@async_timeit
-async def get_temperatures_async(cities: list[str], api_key: str) -> dict[str, float]:
-    """
-    Асинхронно собирает текущую температуру для списка городов и возвращает словарь
-    Применён декоратор для измерения времени выполнения
-    Args:
-        cities (list[str]): Список городов
-        api_key (str): Ключ API OWM
-
-    Returns:
-        dict[str, float]: Словарь город: температура
-    """
-    async with ClientSession(raise_for_status=True) as session:
-        coord_tasks = [get_city_coords(session, city, api_key) for city in cities]
-        coords = await asyncio.gather(*coord_tasks)
-
-        temperature_tasks = [
-            get_current_temperature(session, coord, api_key) for coord in coords
-        ]
-        temperatures = await asyncio.gather(*temperature_tasks)
-
-        result = {city: temp for city, temp in zip(cities, temperatures)}
-
-    return result
-
-
-@sync_timeit
-def get_cities_data_parallel(
-    cities: list[str], data: pd.DataFrame
-) -> dict[str, pd.DataFrame]:
-    """
-    Обрабатывает данные по каждому городу параллельно и возвращает словарь
-
-    Args:
-        cities (list[str]): Список городов
-        data (pd.DataFrame): Исходный датафрейм с температурой
-
-    Returns:
-        dict[str, pd.DataFrame]: Словарь город: обработанный датафрейм
-    """
-    cities_data = {}
-    df = mpd.DataFrame(data)
-    cities_df = df.groupby("city").apply(process_city)
-    for city in cities:
-        city_df = cities_df[cities_df["city"] == city]  # type: ignore
-        cities_data[city] = pd.DataFrame(city_df, columns=city_df.columns)
-
-    return cities_data
-
-
-@sync_timeit
-def get_cities_data_sequential(
-    cities: list[str], data: pd.DataFrame
-) -> dict[str, pd.DataFrame]:
-    """
-    Обрабатывает данные по каждому городу последовательно и возвращает словарь
-
-    Args:
-        cities (list[str]): Список городов
-        data (pd.DataFrame): Исходный датафрейм с температурой
-
-    Returns:
-        dict[str, pd.DataFrame]: Словарь город: обработанный датафрейм
-    """
-    cities_data = {}
-    cities_df = data.groupby("city").apply(process_city)
-    for city in cities:
-        city_df = cities_df[cities_df["city"] == city]  # type: ignore
-        cities_data[city] = city_df
-
-    return cities_data
+from analysis import (
+    get_global_min_max,
+    get_season_thresholds,
+    get_year_stats,
+)
+from benchmark.cpubound import get_cities_data
+from benchmark.iobound import get_temperatures_table
+from config import COLUMN_NAMES, MONTH_TO_SEASON, SEASON_NAMES
+from plots import (
+    get_common_temperature_figure,
+    get_seasonal_temperature_figure,
+)
 
 
 def load_data(uploaded_file) -> pd.DataFrame:
@@ -118,6 +28,39 @@ def load_data(uploaded_file) -> pd.DataFrame:
     """
 
     return pd.read_csv(uploaded_file, parse_dates=["timestamp"])
+
+
+def show_final_message(
+    current_temperature: float,
+    lower: float,
+    upper: float,
+    current_season: str,
+    selected_city: str,
+) -> None:
+    """
+    Показывает сообщение о том, является ли текущая температура аномальной или нормальной для текущего сезона в выбранном городе
+
+    Args:
+        current_temperature (float): Текущая температура
+        lower (float): Нижняя граница нормальной температуры
+        upper (float): Верхняя граница нормальной температуры
+        current_season (str): Текущий сезон
+        selected_city (str): Выбранный город
+    """
+    if lower <= current_temperature <= upper:
+        st.success(
+            f"Данная температура является **нормальной** для сезона **{current_season.lower()}** в городе **{selected_city}**"
+        )
+    elif current_temperature > upper:
+        st.warning(
+            f"Данная температура является **аномально** высокой для сезона **{current_season.lower()}** в городе **{selected_city}**."
+            f"Нормальная температура: от {lower} до {upper}"
+        )
+    elif current_temperature < lower:
+        st.warning(
+            f"Данная температура является **аномально** низкой для сезона **{current_season.lower()}** в городе **{selected_city}**."
+            f"Нормальная температура: от {lower} до {upper}"
+        )
 
 
 def main():
@@ -139,16 +82,7 @@ def main():
 
     st.subheader("Анализ данных")
 
-    if "cities_data" not in st.session_state:
-        _, seq_time = get_cities_data_sequential(cities, data)
-        cities_data, par_time = get_cities_data_parallel(cities, data)
-        st.session_state.cities_data = cities_data
-        st.session_state.seq_time = seq_time
-        st.session_state.par_time = par_time
-
-    else:
-        cities_data = st.session_state.cities_data
-
+    cities_data = get_cities_data(cities.tolist(), data)
     st.write(f"Последовательная обработка заняла {st.session_state.seq_time} секунд")
     st.write(f"Параллельная обработка заняла {st.session_state.par_time} секунд")
 
@@ -165,8 +99,7 @@ def main():
     st.subheader("Описательная статистика")
     st.dataframe(stats_df.rename(columns=COLUMN_NAMES))
 
-    global_max = processed_data.loc[processed_data["temperature"].argmax()]
-    global_min = processed_data.loc[processed_data["temperature"].argmin()]
+    global_min, global_max = get_global_min_max(processed_data)
 
     st.markdown(
         f"Максимальная температура за 9 лет: **{global_max.temperature:.3f} °C** была в **{global_max.year}** году"
@@ -177,86 +110,20 @@ def main():
 
     st.subheader("Визуализация")
 
-    temperature_plot = get_plot(
-        x=processed_data.timestamp,
-        y=processed_data.temperature,
-        mode="lines",
-        name="Температура по дням, °C",
-    )
-    ma30_plot = get_plot(
-        x=processed_data.timestamp,
-        y=processed_data.ma30,
-        mode="lines",
-        name="Скользящее среднее с окном 30 дней",
-        line_color="orange",
-        line_width=3,
-    )
+    common_temp_fig = get_common_temperature_figure(processed_data)
+    st.plotly_chart(common_temp_fig)
 
-    temp_fig = get_figure(
-        [temperature_plot, ma30_plot],
-        title="Общий график температуры",
-        xlabel="Дата",
-        ylabel="Температура, °C",
-    )
-
-    st.plotly_chart(temp_fig)
-    season_fig = px.line(
-        processed_data,
-        "timestamp",
-        "temperature",
-        color="season",
-        line_group="season_code",
-        color_discrete_map=SEASON_COLORS,
-        title="График по сезонам с выделением аномалий",
-    )
-
-    upper_bound_fig = px.line(
-        processed_data, "timestamp", "upper", line_group="season_code"
-    )
-    upper_bound_fig.update_traces(line=dict(color="purple", dash="dash"))
-    lower_bound_fig = px.line(
-        processed_data, "timestamp", "lower", line_group="season_code"
-    )
-    lower_bound_fig.update_traces(line=dict(color="purple", dash="dash"))
-
-    anomalies = processed_data[processed_data["is_anomaly"]]
-
-    season_fig.add_scatter(
-        x=anomalies.timestamp,
-        y=anomalies.temperature,
-        mode="markers",
-        name="Аномалия в данных",
-        marker=dict(size=8, symbol="circle", color="black"),
-    )
-    season_fig.add_traces(upper_bound_fig.data)
-    season_fig.add_traces(lower_bound_fig.data)
-
-    season_fig.update_layout(dict(xaxis_title="Дата", yaxis_title="Температура, °C"))
-
-    st.plotly_chart(season_fig)
+    season_temp_fig = get_seasonal_temperature_figure(processed_data)
+    st.plotly_chart(season_temp_fig)
 
     st.subheader("Текущая температура")
-
     owm_api_key = st.text_input(
         "Введите ключ для OpenWeatherMap API", placeholder="Ваш ключ..."
     )
     if not owm_api_key:
         st.stop()
 
-    if "temperatures" not in st.session_state:
-        try:
-            _, sync_time = asyncio.run(get_temperatures_sync(cities, owm_api_key))
-            temperatures, async_time = asyncio.run(
-                get_temperatures_async(cities, owm_api_key)
-            )
-            st.session_state.temperatures = temperatures
-            st.session_state.sync_time = sync_time
-            st.session_state.async_time = async_time
-        except ClientResponseError as exc:
-            st.error(exc)
-            st.stop()
-    else:
-        temperatures = st.session_state.temperatures
+    temperatures = get_temperatures_table(cities.tolist(), owm_api_key)
 
     current_temperature = temperatures[selected_city]
     st.write(f"Синхронные запросы к API заняли {st.session_state.sync_time} секунд")
@@ -269,20 +136,13 @@ def main():
     current_season = MONTH_TO_SEASON[datetime.now().month]
     lower, upper = get_season_thresholds(processed_data, current_season)
 
-    if lower <= current_temperature <= upper:
-        st.success(
-            f"Данная температура является **нормальной** для сезона **{current_season.lower()}** в городе **{selected_city}**"
-        )
-    elif current_temperature > upper:
-        st.warning(
-            f"Данная температура является **аномально** высокой для сезона **{current_season.lower()}** в городе **{selected_city}**."
-            f"Нормальная температура: от {lower} до {upper}"
-        )
-    elif current_temperature < lower:
-        st.warning(
-            f"Данная температура является **аномально** низкой для сезона **{current_season.lower()}** в городе **{selected_city}**."
-            f"Нормальная температура: от {lower} до {upper}"
-        )
+    show_final_message(
+        current_temperature,
+        lower,
+        upper,
+        current_season,
+        selected_city,
+    )
 
 
 if __name__ == "__main__":
