@@ -22,7 +22,7 @@ def get_cities_data_parallel(
     """
     cities_data = {}
     df = mpd.DataFrame(data)
-    cities_df = df.groupby(("city",)).apply(process_city)
+    cities_df = df.groupby("city").apply(process_city)
     for city in cities:
         city_df = cities_df[cities_df["city"] == city]  # type: ignore
         cities_data[city] = pd.DataFrame(city_df, columns=city_df.columns)  # type: ignore
@@ -45,7 +45,7 @@ def get_cities_data_sequential(
         dict[str, pd.DataFrame]: Словарь город: обработанный датафрейм
     """
     cities_data = {}
-    cities_df = data.groupby(("city",)).apply(process_city)
+    cities_df = data.groupby("city").apply(process_city)
     for city in cities:
         city_df = cities_df[cities_df["city"] == city]  # type: ignore
         cities_data[city] = city_df

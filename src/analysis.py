@@ -53,7 +53,7 @@ def process_city(city_df: pd.DataFrame) -> pd.DataFrame:
     # кодировка сезона в связи с переходом года для зимы
     df["season_code"] = (df.season != df.season.shift()).cumsum()
 
-    season_stats = df.groupby(("season_code",))["temperature"].agg(["mean", "std"])
+    season_stats = df.groupby("season_code")["temperature"].agg(["mean", "std"])
 
     res_df = df.merge(season_stats, on=["season_code"], how="left")
 
@@ -104,7 +104,7 @@ def get_season_thresholds(city_df: pd.DataFrame, season: str) -> tuple[float, fl
     """
     df = city_df.copy()
     overall_season_stats = (
-        df.groupby(("season",))["temperature"].agg(["mean", "std"]).reset_index()
+        df.groupby("season")["temperature"].agg(["mean", "std"]).reset_index()
     )
 
     lower = (
